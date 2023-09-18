@@ -6,6 +6,7 @@ mod parser;
 use error::IOErrorToError;
 pub use error::{Error, Result};
 use file::MarkedFile;
+use inflector::Inflector;
 use parser::ParsedTableMacro;
 pub use parser::FILE_SIGNATURE;
 use std::collections::HashMap;
@@ -273,7 +274,7 @@ pub fn generate_files(
             continue;
         }
 
-        let table_dir = output_models_dir.join(table.name.to_string());
+        let table_dir = output_models_dir.join(table.name.to_string().to_snake_case());
 
         if !table_dir.exists() {
             std::fs::create_dir(&table_dir).attach_path_err(&table_dir)?;

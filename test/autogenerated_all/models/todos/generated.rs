@@ -5,8 +5,8 @@ use crate::schema::*;
 use diesel::QueryResult;
 use serde::{Deserialize, Serialize};
 
-type ConnectionType =
-    diesel::r2d2::PooledConnection<diesel::r2d2::ConnectionManager<diesel::PgConnection>>;
+
+type ConnectionType = diesel::r2d2::PooledConnection<diesel::r2d2::ConnectionManager<diesel::PgConnection>>;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Queryable, Insertable, AsChangeset, Selectable)]
 #[diesel(table_name=todos, primary_key(id))]
@@ -15,11 +15,13 @@ pub struct Todo {
     pub created_at: chrono::NaiveDateTime,
 }
 
+
 #[derive(Debug, Serialize, Deserialize, Clone, Queryable, Insertable, AsChangeset, Default)]
 #[diesel(table_name=todos)]
 pub struct UpdateTodo {
     pub created_at: Option<chrono::NaiveDateTime>,
 }
+
 
 #[derive(Debug, Serialize)]
 pub struct CursorPaginationResult<T, K> {
@@ -31,6 +33,7 @@ pub struct CursorPaginationResult<T, K> {
 }
 
 impl Todo {
+
     pub fn create(db: &mut ConnectionType) -> QueryResult<Self> {
         use crate::schema::todos::dsl::*;
 
@@ -49,19 +52,13 @@ impl Todo {
         diesel::delete(todos.filter(id.eq(param_id))).execute(db)
     }
 
+    
     /// Paginates through the table based on a cursor
-    pub fn paginate_cursor(
-        db: &mut ConnectionType,
-        limit: i64,
-        cursor: i32,
-    ) -> QueryResult<CursorPaginationResult<Self, i32>> {
+    pub fn paginate_cursor(db: &mut ConnectionType, limit: i64, cursor: i32) -> QueryResult<CursorPaginationResult<Self, i32>> {
         use crate::schema::todos::dsl::*;
 
         let limit = if limit < 1 { 1 } else { limit };
-        let items = todos
-            .filter(id.eq(param_id))
-            .limit(limit)
-            .load::<Self>(db)?;
+        let items = todos.filter(id.eq(param_id)).limit(limit).load::<Self>(db)?;
 
         let start_cursor = items.first().map(|it| i32);
         let end_cursor = items.last().map(|it| i32);
@@ -77,9 +74,10 @@ impl Todo {
             has_next_page,
         })
     }
+
 }
 pub struct TodoBatcher {
-    db: ConnectionType,
+    db: ConnectionType
 }
 
 pub type TodoLoader = Loader<i32, Todo, TodoBatcher>;
@@ -103,3 +101,4 @@ impl BatchFn<i32, Todo> for TodoBatcher {
         Ok(map)
     }
 }
+        
