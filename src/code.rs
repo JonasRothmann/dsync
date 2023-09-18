@@ -320,6 +320,17 @@ fn build_table_fns(
         })
         .collect::<Vec<String>>()
         .join(", ");
+
+    // return tuple if multiple
+    let primary_keys_multiple = primary_column_name_and_type.len() > 1;
+    let primary_key_type = if primary_column_name_and_type.is_empty() {
+        None
+    } else if primary_keys_multiple {
+        Some(format!("({})", item_id_params))
+    } else {
+        Some(primary_column_name_and_type[0].1.to_string())
+    };
+
     let item_id_filters = primary_column_name_and_type
         .iter()
         .map(|name_and_type| {
@@ -362,11 +373,17 @@ fn build_table_fns(
     let update_struct_identifier = &update_struct.identifier;
     let item_id_params = item_id_params;
     let item_id_filters = item_id_filters;
+    let serde_derive = if table_options.get_serde() {
+        "Serialize"
+    } else {
+        ""
+    };
 
     let mut buffer = String::new();
 
-    buffer.push_str(&format!(
-        r##"{tsync}
+    if config.generates_offset_pagination {
+        buffer.push_str(&format!(
+            r##"{tsync}
 #[derive(Debug, {serde_derive})]
 pub struct PaginationResult<T> {{
     pub items: Vec<T>,
@@ -376,13 +393,24 @@ pub struct PaginationResult<T> {{
     pub page_size: i64,
     pub num_pages: i64,
 }}
-"##,
-        serde_derive = if table_options.get_serde() {
-            "Serialize"
-        } else {
-            ""
-        }
-    ));
+"##
+        ));
+    }
+
+    if config.generates_cursor_pagination {
+        buffer.push_str(&format!(
+            r##"{tsync}
+#[derive(Debug, {serde_derive})]
+pub struct CursorPaginationResult<T, K> {{
+    pub items: Vec<T>,
+    pub start_cursor: Option<K>,
+    pub end_cursor: Option<K>,
+    pub has_previous_page: bool,
+    pub has_next_page: bool,
+}}
+"##
+        ));
+    }
 
     buffer.push_str(&format!(
         r##"
@@ -390,8 +418,9 @@ impl {struct_name} {{
 "##
     ));
 
-    if create_struct.has_fields() {
-        buffer.push_str(&format!(
+    if config.generates_crud {
+        if create_struct.has_fields() {
+            buffer.push_str(&format!(
             r##"
     pub{async_keyword} fn create(db: &mut ConnectionType, item: &{create_struct_identifier}) -> QueryResult<Self> {{
         use {schema_path}{table_name}::dsl::*;
@@ -400,29 +429,42 @@ impl {struct_name} {{
     }}
 "##
         ));
-    } else {
-        buffer.push_str(&format!(
-            r##"
+        } else {
+            buffer.push_str(&format!(
+                r##"
     pub{async_keyword} fn create(db: &mut ConnectionType) -> QueryResult<Self> {{
         use {schema_path}{table_name}::dsl::*;
 
         insert_into({table_name}).default_values().get_result::<Self>(db){await_keyword}
     }}
 "##
-        ));
-    }
+            ));
+        }
 
-    buffer.push_str(&format!(
-        r##"
+        buffer.push_str(&format!(
+            r##"
     pub{async_keyword} fn read(db: &mut ConnectionType, {item_id_params}) -> QueryResult<Self> {{
         use {schema_path}{table_name}::dsl::*;
 
         {table_name}.{item_id_filters}.first::<Self>(db){await_keyword}
     }}
 "##
-    ));
+        ));
 
-    buffer.push_str(&format!(r##"
+        buffer.push_str(&format!(
+            r##"
+    pub{async_keyword} fn delete(db: &mut ConnectionType, {item_id_params}) -> QueryResult<usize> {{
+        use {schema_path}{table_name}::dsl::*;
+
+        diesel::delete({table_name}.{item_id_filters}).execute(db){await_keyword}
+    }}
+"##
+        ));
+    }
+
+    // Offset pagination
+    if config.generates_offset_pagination {
+        buffer.push_str(&format!(r##"
     /// Paginates through the table where page is a 0-based index (i.e. page 0 is the first page)
     pub{async_keyword} fn paginate(db: &mut ConnectionType, page: i64, page_size: i64) -> QueryResult<PaginationResult<Self>> {{
         use {schema_path}{table_name}::dsl::*;
@@ -441,39 +483,77 @@ impl {struct_name} {{
         }})
     }}
 "##));
-
-    // TODO: If primary key columns are attached to the form struct (not optionally)
-    // then don't require item_id_params (otherwise it'll be duplicated)
-
-    // if has_update_struct {
-    if update_struct.has_fields() {
-        // It's possible we have a form struct with all primary keys (for example, for a join table).
-        // In this scenario, we also have to check whether there are any updatable columns for which
-        // we should generate an update() method.
-
-        buffer.push_str(&format!(r##"
-    pub{async_keyword} fn update(db: &mut ConnectionType, {item_id_params}, item: &{update_struct_identifier}) -> QueryResult<Self> {{
-        use {schema_path}{table_name}::dsl::*;
-
-        diesel::update({table_name}.{item_id_filters}).set(item).get_result(db){await_keyword}
-    }}
-"##));
     }
 
-    buffer.push_str(&format!(
-        r##"
-    pub{async_keyword} fn delete(db: &mut ConnectionType, {item_id_params}) -> QueryResult<usize> {{
+    // Cursor-based pagination
+    if let Some(primary_key_type) = &primary_key_type {
+        if config.generates_cursor_pagination {
+            buffer.push_str(&format!(r##"
+    
+    /// Paginates through the table based on a cursor
+    pub{async_keyword} fn paginate_cursor(db: &mut ConnectionType, limit: i64, cursor: {primary_key_type}) -> QueryResult<CursorPaginationResult<Self, {primary_key_type}>> {{
         use {schema_path}{table_name}::dsl::*;
 
-        diesel::delete({table_name}.{item_id_filters}).execute(db){await_keyword}
+        let limit = if limit < 1 {{ 1 }} else {{ limit }};
+        let items = {table_name}.{item_id_filters}.limit(limit).load::<Self>(db){await_keyword}?;
+
+        let start_cursor = items.first().map(|it| {primary_key_type});
+        let end_cursor = items.last().map(|it| {primary_key_type});
+
+        let has_previous_page = start_cursor.is_some();
+        let has_next_page = end_cursor.is_some();
+
+        Ok(CursorPaginationResult {{
+            items,
+            start_cursor,
+            end_cursor,
+            has_previous_page,
+            has_next_page,
+        }})
     }}
-"##
-    ));
+"##));
+        }
+    }
 
     buffer.push_str(
         r##"
 }"##,
     );
+
+    if let Some(primary_key_type) = &primary_key_type {
+        if config.generates_dataloader {
+            let batcher_name = format!("{}Batcher", struct_name.to_pascal_case());
+            let loader_name = format!("{}Loader", struct_name.to_pascal_case());
+
+            buffer.push_str(&format!(r##"
+pub struct {batcher_name} {
+    db: ConnectionType
+}
+
+pub type {loader_name} = Loader<{primary_key_type}, {struct_name}, {batcher_name}>;
+
+impl {batcher_name} {
+    pub fn new(db: &mut ConnectionType) -> {loader_name} {
+        Loader::new(Self { db })
+    }
+}
+
+#[async_trait]
+impl BatchFn<{primary_key_type}, {struct_name}> for {batcher_name} {{
+    async fn load(&self, keys: &[{primary_key_type}]) -> Result<HashMap<{primary_key_type}, {struct_name}>, Error> {{
+        let mut items = {struct_name}::read_many(&mut self.db, keys).await?;
+        let mut map = HashMap::new();
+
+        for item in items.drain(..) {{
+            map.insert(item.id, item);
+        }}
+
+        Ok(map)
+    }}
+}}
+        "##))
+        }
+    }
 
     buffer
 }

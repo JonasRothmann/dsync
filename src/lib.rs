@@ -155,6 +155,11 @@ pub struct GenerationConfig<'a> {
     ///
     /// by default `crate::models::`
     pub model_path: String,
+
+    pub generates_crud: bool,
+    pub generates_offset_pagination: bool,
+    pub generates_cursor_pagination: bool,
+    pub generates_dataloader: bool,
 }
 
 impl GenerationConfig<'_> {

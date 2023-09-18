@@ -24,13 +24,12 @@ pub struct UpdateTodo {
 
 
 #[derive(Debug, Serialize)]
-pub struct PaginationResult<T> {
+pub struct CursorPaginationResult<T, K> {
     pub items: Vec<T>,
-    pub total_items: i64,
-    /// 0-based index
-    pub page: i64,
-    pub page_size: i64,
-    pub num_pages: i64,
+    pub start_cursor: Option<K>,
+    pub end_cursor: Option<K>,
+    pub has_previous_page: bool,
+    pub has_next_page: bool,
 }
 
 impl Todo {
@@ -47,34 +46,47 @@ impl Todo {
         todos.filter(id.eq(param_id)).first::<Self>(db)
     }
 
-    /// Paginates through the table where page is a 0-based index (i.e. page 0 is the first page)
-    pub fn paginate(db: &mut ConnectionType, page: i64, page_size: i64) -> QueryResult<PaginationResult<Self>> {
-        use crate::schema::todos::dsl::*;
-
-        let page_size = if page_size < 1 { 1 } else { page_size };
-        let total_items = todos.count().get_result(db)?;
-        let items = todos.limit(page_size).offset(page * page_size).load::<Self>(db)?;
-
-        Ok(PaginationResult {
-            items,
-            total_items,
-            page,
-            page_size,
-            /* ceiling division of integers */
-            num_pages: total_items / page_size + i64::from(total_items % page_size != 0)
-        })
-    }
-
-    pub fn update(db: &mut ConnectionType, param_id: i32, item: &UpdateTodo) -> QueryResult<Self> {
-        use crate::schema::todos::dsl::*;
-
-        diesel::update(todos.filter(id.eq(param_id))).set(item).get_result(db)
-    }
-
     pub fn delete(db: &mut ConnectionType, param_id: i32) -> QueryResult<usize> {
         use crate::schema::todos::dsl::*;
 
         diesel::delete(todos.filter(id.eq(param_id))).execute(db)
     }
 
+    
+    /// Paginates through the table based on a cursor
+    pub fn paginate_cursor(db: &mut ConnectionType, limit: i64, cursor: i32) -> QueryResult<CursorPaginationResult<Self, i32>> {
+        use crate::schema::todos::dsl::*;
+
+        let limit = if limit < 1 { 1 } else { limit };
+        let items = todos.filter(id.eq(param_id)).limit(limit).load::<Self>(db)?;
+
+        let start_cursor = items.first().map(|it| i32);
+        let end_cursor = items.last().map(|it| i32);
+
+        let has_previous_page = start_cursor.is_some();
+        let has_next_page = end_cursor.is_some();
+
+        Ok(CursorPaginationResult {
+            items,
+            start_cursor,
+            end_cursor,
+            has_previous_page,
+            has_next_page,
+        })
+    }
+
 }
+#[async_trait]
+impl BatchFn<i32, Todo> for TodoBatcher {
+    async fn load(&self, keys: &[i32]) -> Result<HashMap<i32, Todo>, Error> {
+        let mut items = Todo::read_many(&mut self.db, keys).await?;
+        let mut map = HashMap::new();
+
+        for item in items.drain(..) {
+            map.insert(item.id, item);
+        }
+
+        Ok(map)
+    }
+}
+        

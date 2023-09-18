@@ -82,6 +82,18 @@ pub struct MainOptions {
     /// Do not generate the CRUD (impl) functions for generated models
     #[arg(long = "no-crud")]
     pub no_crud: bool,
+
+    /// Generate cursor pagination for all tables
+    #[arg(long = "generates-cursor-pagination")]
+    pub generates_cursor_pagination: bool,
+
+    /// Generate offset pagination for all tables
+    #[arg(long = "generates-offset-pagination")]
+    pub generates_offset_pagination: bool,
+
+    /// Generate dataloader for all tables
+    #[arg(long = "generates-dataloader")]
+    pub generates_dataloader: bool,
 }
 
 fn main() {
@@ -154,6 +166,10 @@ fn actual_main() -> dsync::Result<()> {
             connection_type: args.connection_type,
             schema_path: args.schema_path,
             model_path: args.model_path,
+            generates_crud: !args.no_crud,
+            generates_cursor_pagination: args.generates_cursor_pagination,
+            generates_offset_pagination: args.generates_offset_pagination,
+            generates_dataloader: args.generates_dataloader,
         },
     )?;
 
