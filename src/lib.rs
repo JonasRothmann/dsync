@@ -160,6 +160,7 @@ pub struct GenerationConfig<'a> {
     pub generates_offset_pagination: bool,
     pub generates_cursor_pagination: bool,
     pub generates_dataloader: bool,
+    pub ignore_underscore_prefix: bool,
 }
 
 impl GenerationConfig<'_> {
@@ -243,6 +244,8 @@ pub fn generate_files(
     output_models_dir: &Path,
     config: GenerationConfig,
 ) -> Result<Vec<FileChange>> {
+    let ignore_underscore_prefix = config.ignore_underscore_prefix;
+
     let generated = generate_code(
         &std::fs::read_to_string(input_diesel_schema_file)
             .attach_path_err(input_diesel_schema_file)?,
@@ -266,6 +269,10 @@ pub fn generate_files(
 
     // pass 1: add code for new tables
     for table in generated.iter() {
+        if ignore_underscore_prefix && table.name.to_string().starts_with('_') {
+            continue;
+        }
+
         let table_dir = output_models_dir.join(table.name.to_string());
 
         if !table_dir.exists() {

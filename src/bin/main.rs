@@ -94,6 +94,10 @@ pub struct MainOptions {
     /// Generate dataloader for all tables
     #[arg(long = "generates-dataloader")]
     pub generates_dataloader: bool,
+
+    /// ignore tables with underscore prefix
+    #[arg(long = "ignore-underscore")]
+    pub ignore_underscore_prefix: bool,
 }
 
 fn main() {
@@ -170,6 +174,7 @@ fn actual_main() -> dsync::Result<()> {
             generates_cursor_pagination: args.generates_cursor_pagination,
             generates_offset_pagination: args.generates_offset_pagination,
             generates_dataloader: args.generates_dataloader,
+            ignore_underscore_prefix: args.ignore_underscore_prefix,
         },
     )?;
 

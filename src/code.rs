@@ -526,17 +526,17 @@ impl {struct_name} {{
             let loader_name = format!("{}Loader", struct_name.to_pascal_case());
 
             buffer.push_str(&format!(r##"
-pub struct {batcher_name} {
+pub struct {batcher_name} {{
     db: ConnectionType
-}
+}}
 
 pub type {loader_name} = Loader<{primary_key_type}, {struct_name}, {batcher_name}>;
 
-impl {batcher_name} {
-    pub fn new(db: &mut ConnectionType) -> {loader_name} {
-        Loader::new(Self { db })
-    }
-}
+impl {batcher_name} {{
+    pub fn new(db: &mut ConnectionType) -> {loader_name} {{
+        Loader::new(Self {{ db }})
+    }}
+}}
 
 #[async_trait]
 impl BatchFn<{primary_key_type}, {struct_name}> for {batcher_name} {{
