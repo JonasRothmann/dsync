@@ -91,6 +91,13 @@ impl std::error::Error for Error {
     }
 }
 
+// implement error for postgres::Error
+impl From<postgres::Error> for Error {
+    fn from(value: postgres::Error) -> Self {
+        Self::new(ErrorEnum::Other(value.to_string()))
+    }
+}
+
 // implement all From<> variants that ErrorInner also implements
 impl<T> From<T> for Error
 where

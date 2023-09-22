@@ -1,8 +1,10 @@
 mod code;
+mod enums;
 pub mod error;
 mod file;
 mod parser;
 
+use enums::generate_enums;
 use error::IOErrorToError;
 pub use error::{Error, Result};
 use file::MarkedFile;
@@ -148,6 +150,7 @@ pub struct GenerationConfig<'a> {
     ///
     /// Example: `diesel::SqliteConnection`
     pub connection_type: String,
+    pub pool_type: String,
     /// Diesel schema import path
     ///
     /// by default `crate::schema::`
@@ -162,6 +165,9 @@ pub struct GenerationConfig<'a> {
     pub generates_cursor_pagination: bool,
     pub generates_dataloader: bool,
     pub ignore_underscore_prefix: bool,
+
+    #[cfg(feature = "enums")]
+    pub database_url: String,
 }
 
 impl GenerationConfig<'_> {
@@ -180,7 +186,7 @@ impl GenerationConfig<'_> {
 /// Model is returned and not saved to disk yet
 pub fn generate_code(
     diesel_schema_file_contents: &str,
-    config: GenerationConfig,
+    config: &GenerationConfig,
 ) -> Result<Vec<ParsedTableMacro>> {
     parser::parse_and_generate_code(diesel_schema_file_contents, &config)
 }
@@ -250,7 +256,7 @@ pub fn generate_files(
     let generated = generate_code(
         &std::fs::read_to_string(input_diesel_schema_file)
             .attach_path_err(input_diesel_schema_file)?,
-        config,
+        &config,
     )?;
 
     if !output_models_dir.exists() {
@@ -271,7 +277,10 @@ pub fn generate_files(
     // pass 1: add code for new tables
     for table in generated.iter() {
         if ignore_underscore_prefix && table.name.to_string().starts_with('_') {
+            println!("Ignoring table {}", table.name.to_string());
             continue;
+        } else {
+            println!("Generating table {}", table.name.to_string());
         }
 
         let table_dir = output_models_dir.join(table.name.to_string().to_snake_case());
@@ -298,7 +307,7 @@ pub fn generate_files(
         table_mod_rs.write()?;
         file_changes.push(FileChange::from(&table_mod_rs));
 
-        mod_rs.ensure_mod_stmt(&table.name.to_string());
+        mod_rs.ensure_mod_stmt(&table.name.to_string().to_snake_case());
     }
 
     // pass 2: delete code for removed tables
@@ -331,6 +340,7 @@ pub fn generate_files(
         let found = generated.iter().find(|g| {
             g.name
                 .to_string()
+                .to_snake_case()
                 .eq_ignore_ascii_case(associated_table_name)
         });
         if found.is_some() {
@@ -343,6 +353,8 @@ pub fn generate_files(
             &generated_rs_path,
             FileChangeStatus::Deleted,
         ));
+
+        println!("Deleted table {}", associated_table_name);
 
         // remove the mod.rs file if there isn't anything left in there except the use stmt
         let table_mod_rs_path = item.path().join("mod.rs");
@@ -377,8 +389,54 @@ pub fn generate_files(
         mod_rs.remove_mod_stmt(associated_table_name);
     }
 
+    #[cfg(feature = "enums")]
+    {
+        let mut enums_rs = MarkedFile::new(output_models_dir.join("enums.rs"))?;
+        enums_rs.file_contents = generate_enums(&config)?;
+        enums_rs.write()?;
+        mod_rs.ensure_mod_stmt("enums");
+    }
+
     mod_rs.write()?;
     file_changes.push(FileChange::from(&mod_rs));
 
     Ok(file_changes)
+}
+
+trait EnsureNonKeyword {
+    fn ensure_non_keyword(self) -> Self;
+}
+
+const KEYWORDS: [&str; 47] = [
+    "abstract", "as", "become", "box", "break", "const", "continue", "crate", "do", "else", "enum",
+    "extern", "false", "final", "fn", "for", "if", "impl", "in", "let", "loop", "macro", "match",
+    "mod", "move", "mut", "override", "priv", "pub", "ref", "return", "self", "Self", "static",
+    "struct", "super", "trait", "true", "type", "typeof", "unsafe", "unsized", "use", "virtual",
+    "where", "while", "yield",
+];
+
+impl EnsureNonKeyword for String {
+    fn ensure_non_keyword(self) -> Self {
+        if KEYWORDS.contains(&self.as_str()) {
+            format!("{}_", self)
+        } else {
+            self
+        }
+    }
+}
+
+const EXISTING_STRUCTS: [&str; 1] = ["Connection"];
+
+trait EnsureNonExisting {
+    fn ensure_non_existing(self) -> Self;
+}
+
+impl EnsureNonExisting for String {
+    fn ensure_non_existing(self) -> Self {
+        if EXISTING_STRUCTS.contains(&self.as_str()) {
+            format!("{}Model", self)
+        } else {
+            self
+        }
+    }
 }

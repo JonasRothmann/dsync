@@ -1,8 +1,8 @@
 use indoc::indoc;
 use inflector::Inflector;
 
-use crate::parser::{ParsedTableMacro, FILE_SIGNATURE};
-use crate::{GenerationConfig, TableOptions};
+use crate::parser::{ParsedTableMacro, RelationType, FILE_SIGNATURE};
+use crate::{EnsureNonExisting, EnsureNonKeyword, GenerationConfig, TableOptions};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StructType {
@@ -47,6 +47,7 @@ impl StructType {
             struct_name = name,
             struct_suffix = self.suffix()
         )
+        .ensure_non_existing()
     }
 }
 
@@ -77,6 +78,8 @@ pub struct StructField {
     pub base_type: String,
 
     pub is_optional: bool,
+
+    pub macros: Vec<String>,
 }
 
 impl<'a> Struct<'a> {
@@ -86,6 +89,8 @@ impl<'a> Struct<'a> {
         table: &'a ParsedTableMacro,
         config: &'a GenerationConfig<'_>,
     ) -> Self {
+        println!("Generating struct for table {}", table.name.to_string());
+
         let mut obj = Self {
             identifier: ty.format(table.struct_name.as_str()),
             opts: config.table(&table.name.to_string()),
@@ -123,7 +128,7 @@ impl<'a> Struct<'a> {
 
     /// Assemble all derives for the struct
     fn attr_derive(&self) -> String {
-        format!("#[derive(Debug, {derive_serde}Clone, Queryable, Insertable{derive_aschangeset}{derive_identifiable}{derive_associations}{derive_selectable}{derive_default})]",
+        format!("#[derive(Debug, {derive_serde}Clone, Queryable, Insertable{derive_aschangeset}{derive_identifiable}{derive_associations}{derive_selectable}{derive_default}, new)]",
                 derive_selectable = match self.ty {
                     StructType::Read => { ", Selectable" }
                     _ => { "" }
@@ -140,7 +145,7 @@ impl<'a> Struct<'a> {
                     }
                     _ => { "" }
                 },
-                derive_aschangeset = if self.fields().iter().all(|f| self.table.primary_key_column_names().contains(&f.name)) {""} else { ", AsChangeset" },
+                derive_aschangeset = if self.fields().iter().all(|f| self.table.primary_key_column_names().contains(&f.name)) {""} else { "" },
                 derive_default = match self.ty {
                     StructType::Update => { ", Default" }
                     _ => { "" }
@@ -175,7 +180,7 @@ impl<'a> Struct<'a> {
                 }
             })
             .map(|c| {
-                let name = c.name.to_string();
+                let name = c.name.to_string().to_snake_case().ensure_non_keyword();
                 let base_type = if c.is_unsigned {
                     c.ty.replace('i', "u")
                 } else {
@@ -187,6 +192,17 @@ impl<'a> Struct<'a> {
                     base_type
                 };
                 let mut is_optional = false;
+
+                let mut macros = vec![];
+                if name != c.name.to_string() {
+                    macros.push(format!(
+                        "#[diesel(column_name = \"{}\")]",
+                        c.name.to_string()
+                    ));
+                }
+                if c.is_nullable {
+                    macros.push("#[new(default)]".to_string());
+                }
 
                 let is_pk = self
                     .table
@@ -214,6 +230,7 @@ impl<'a> Struct<'a> {
                     name,
                     base_type,
                     is_optional,
+                    macros,
                 }
             })
             .collect()
@@ -232,7 +249,7 @@ impl<'a> Struct<'a> {
             .map(|fk| {
                 format!(
                     ", belongs_to({foreign_table_name}, foreign_key={join_column})",
-                    foreign_table_name = fk.0.to_string().to_pascal_case().to_singular(),
+                    foreign_table_name = fk.0.to_string().to_pascal_case(), //.to_singular(),
                     join_column = fk.1
                 )
             })
@@ -242,7 +259,7 @@ impl<'a> Struct<'a> {
         let struct_code = format!(
             indoc! {r#"
             {tsync_attr}{derive_attr}
-            #[diesel(table_name={table_name}{primary_key}{belongs_to})]
+            #[diesel(table_name=schema::{table_name}{primary_key}{belongs_to})]
             pub struct {struct_name} {{
             $COLUMNS$
             }}
@@ -272,6 +289,10 @@ impl<'a> Struct<'a> {
             } else {
                 f.base_type.clone()
             };
+
+            for m in &f.macros {
+                lines.push(format!("    {}", m));
+            }
 
             lines.push(format!(r#"    pub {field_name}: {field_type},"#));
         }
@@ -326,9 +347,40 @@ fn build_table_fns(
     let primary_key_type = if primary_column_name_and_type.is_empty() {
         None
     } else if primary_keys_multiple {
-        Some(format!("({})", item_id_params))
+        Some(format!(
+            "({})",
+            primary_column_name_and_type
+                .iter()
+                .map(|it| it.1.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        ))
     } else {
         Some(primary_column_name_and_type[0].1.to_string())
+    };
+
+    // takes the primary key (can be tuple or other type), and generates diesel filter for it
+    let primary_key_filter = if primary_column_name_and_type.len() > 0 {
+        let contents = primary_column_name_and_type
+            .iter()
+            .enumerate()
+            .map(|(index, name_and_type)| {
+                format!(
+                    "filter({name}.eq({value}))",
+                    name = name_and_type.0.to_string(),
+                    value = if primary_column_name_and_type.len() > 1 {
+                        format!("cursor.{index}", index = index)
+                    } else {
+                        "cursor".to_string()
+                    }
+                )
+            })
+            .collect::<Vec<String>>()
+            .join(".");
+
+        Some(contents)
+    } else {
+        None
     };
 
     let item_id_filters = primary_column_name_and_type
@@ -367,7 +419,7 @@ fn build_table_fns(
     };
     #[cfg(not(feature = "async"))]
     let await_keyword = "";
-    let struct_name = &table.struct_name;
+    let struct_name = table.struct_name.clone().ensure_non_existing();
     let schema_path = &config.schema_path;
     let create_struct_identifier = &create_struct.identifier;
     let update_struct_identifier = &update_struct.identifier;
@@ -487,18 +539,18 @@ impl {struct_name} {{
 
     // Cursor-based pagination
     if let Some(primary_key_type) = &primary_key_type {
-        if config.generates_cursor_pagination {
-            buffer.push_str(&format!(r##"
-    
+        if let Some(primary_key_filter) = &primary_key_filter {
+            if config.generates_cursor_pagination {
+                buffer.push_str(&format!(r##"
     /// Paginates through the table based on a cursor
     pub{async_keyword} fn paginate_cursor(db: &mut ConnectionType, limit: i64, cursor: {primary_key_type}) -> QueryResult<CursorPaginationResult<Self, {primary_key_type}>> {{
         use {schema_path}{table_name}::dsl::*;
 
         let limit = if limit < 1 {{ 1 }} else {{ limit }};
-        let items = {table_name}.{item_id_filters}.limit(limit).load::<Self>(db){await_keyword}?;
+        let items = {table_name}.{primary_key_filter}.limit(limit).load::<Self>(db){await_keyword}?;
 
-        let start_cursor = items.first().map(|it| {primary_key_type});
-        let end_cursor = items.last().map(|it| {primary_key_type});
+        let start_cursor = items.first().map(|it| {primary_key_mapping});
+        let end_cursor = items.last().map(|it| {primary_key_mapping});
 
         let has_previous_page = start_cursor.is_some();
         let has_next_page = end_cursor.is_some();
@@ -511,7 +563,23 @@ impl {struct_name} {{
             has_next_page,
         }})
     }}
-"##));
+"##, primary_key_mapping = if primary_keys_multiple {
+    format!(
+        "({})",
+        primary_column_name_and_type
+            .iter()
+            .map(|name_and_type| format!("it.{name}", name = name_and_type.0))
+            .collect::<Vec<String>>()
+            .join(", ")
+    )
+} else {
+    if primary_column_name_and_type.len() > 0 {
+        format!("it.{name}", name = primary_column_name_and_type[0].0).to_string()
+    } else {
+        panic!("Primary key type is None")
+    }
+}));
+            }
         }
     }
 
@@ -524,40 +592,112 @@ impl {struct_name} {{
         if config.generates_dataloader {
             let batcher_name = format!("{}Batcher", struct_name.to_pascal_case());
             let loader_name = format!("{}Loader", struct_name.to_pascal_case());
+            let batcher_param_filter = if primary_keys_multiple {
+                primary_column_name_and_type
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (column_name, ty))| {
+                        format!("filter({name}.eq_any(keys.iter().map(|key| &key.{index}).collect::<Vec<_>>()))", name = column_name)
+                    })
+                    .collect::<Vec<String>>()
+                    .join(".")
+            } else {
+                format!(
+                    "filter({name}.eq_any(keys))",
+                    name = primary_column_name_and_type[0].0
+                )
+            };
+
+            let batcher_keys_map = if primary_keys_multiple {
+                primary_column_name_and_type
+                    .iter()
+                    .map(|(column_name, _)| {
+                        format!("e.{name}.clone()", name = column_name.to_snake_case())
+                    })
+                    .collect::<Vec<String>>()
+                    .join(", ")
+            } else {
+                format!("e.{name}.clone()", name = primary_column_name_and_type[0].0)
+            };
 
             buffer.push_str(&format!(r##"
 pub struct {batcher_name} {{
-    db: ConnectionType
+    pool: Pool
 }}
 
 pub type {loader_name} = Loader<{primary_key_type}, {struct_name}, {batcher_name}>;
 
 impl {batcher_name} {{
-    pub fn new(db: &mut ConnectionType) -> {loader_name} {{
-        Loader::new(Self {{ db }})
+    pub fn new(pool: Pool) -> {loader_name} {{
+        Loader::new(Self {{ pool }})
     }}
 }}
 
 #[async_trait]
 impl BatchFn<{primary_key_type}, {struct_name}> for {batcher_name} {{
-    async fn load(&self, keys: &[{primary_key_type}]) -> Result<HashMap<{primary_key_type}, {struct_name}>, Error> {{
-        let mut items = {struct_name}::read_many(&mut self.db, keys).await?;
-        let mut map = HashMap::new();
+    async fn load(&mut self, keys: &[{primary_key_type}]) -> HashMap<{primary_key_type}, {struct_name}> {{
+        use {schema_path}{table_name}::dsl::*;
+        
+        let conn = &mut self.pool.get().unwrap();
 
-        for item in items.drain(..) {{
-            map.insert(item.id, item);
-        }}
+        println!("load {struct_name} by batch {{:?}}", keys);
 
-        Ok(map)
+        {table_name}
+            .{batcher_param_filter}
+            .select(super::{struct_name}::as_select())
+            .load::<super::{struct_name}>(conn)
+            .expect("Error loading {batcher_name}")
+            .into_iter()
+            .map(|e| (({batcher_keys_map}), e))
+            .collect()
     }}
 }}
-        "##))
-        }
+        "##));
+        };
     }
+
+    /*
+        if table.relations.len() > 0 {
+            let relations = table
+                .relations
+                .iter()
+                .map(|rel| {
+                    format!(
+                        r#"
+    #[hansa({derive})]
+    pub {relation_name},
+    "#,
+                        relation_name = rel.table2.to_string().to_snake_case(),
+                        derive = match rel.relation_type {
+                            RelationType::OneToOne { table1_column } => {
+                                format!("has_one={table1}, join_column=,", table1 = rel.table1)
+                            }
+                            RelationType::ManyToMany {
+                                join_table,
+                                table1_join_column,
+                                table2_join_column,
+                            } => {
+                                format!("has_many={table2}", table2 = rel.table2,)
+                            }
+                        }
+                        .to_string()
+                    )
+                })
+                .collect::<Vec<String>>()
+                .join(", ");
+
+            buffer.push_str(&format!(
+                r##"
+    pub enum Relations {{
+        {relations}
+    }}
+            "##
+            ));
+        }
+         */
 
     buffer
 }
-
 /// Generate all imports for the struct file that are required
 fn build_imports(table: &ParsedTableMacro, config: &GenerationConfig) -> String {
     let table_options = config.table(&table.name.to_string());
@@ -567,8 +707,8 @@ fn build_imports(table: &ParsedTableMacro, config: &GenerationConfig) -> String 
         .map(|fk| {
             format!(
                 "use {model_path}{foreign_table_name_model}::{singular_struct_name};",
-                foreign_table_name_model = fk.0.to_string().to_snake_case().to_lowercase(),
-                singular_struct_name = fk.0.to_string().to_pascal_case().to_singular(),
+                foreign_table_name_model = fk.0.to_string().to_snake_case(),
+                singular_struct_name = fk.0.to_string().to_pascal_case(), //.to_singular(),
                 model_path = config.model_path
             )
         })
@@ -584,7 +724,8 @@ fn build_imports(table: &ParsedTableMacro, config: &GenerationConfig) -> String 
     let async_imports = "";
 
     let mut schema_path = config.schema_path.clone();
-    schema_path.push('*');
+    //schema_path.push('*'); -- this breaks with upper-case table names
+    schema_path.push_str("{self}");
 
     let serde_imports = if table_options.get_serde() {
         "use serde::{Deserialize, Serialize};"
@@ -600,11 +741,23 @@ fn build_imports(table: &ParsedTableMacro, config: &GenerationConfig) -> String 
 
     let connection_type_alias = if table_options.get_fns() {
         format!(
-            "\ntype ConnectionType = {connection_type};",
+            "\ntype ConnectionType = {connection_type};\ntype Pool = {pool_type};",
             connection_type = config.connection_type,
+            pool_type = config.pool_type
         )
     } else {
         "".to_string()
+    };
+
+    let dataloader_imports = if config.generates_dataloader {
+        r#"
+use async_trait::async_trait;
+use dataloader::cached::Loader;
+use dataloader::BatchFn;
+use std::collections::HashMap;
+"#
+    } else {
+        ""
     };
 
     format!(
@@ -614,6 +767,7 @@ fn build_imports(table: &ParsedTableMacro, config: &GenerationConfig) -> String 
         {serde_imports}{async_imports}
         {belongs_imports}
         {connection_type_alias}
+        {dataloader_imports}
     "},
         belongs_imports = belongs_imports,
         async_imports = async_imports,
@@ -621,6 +775,7 @@ fn build_imports(table: &ParsedTableMacro, config: &GenerationConfig) -> String 
         serde_imports = serde_imports,
         fns_imports = fns_imports,
         connection_type_alias = connection_type_alias,
+        dataloader_imports = dataloader_imports
     )
     .trim_end()
     .to_string()

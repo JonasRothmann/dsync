@@ -11,10 +11,11 @@ authors = ["Haris <4259838+Wulf@users.noreply.github.com>"]
 edition = "2021"
 
 [features]
-default = ["tsync", "backtrace"]
+default = ["tsync", "backtrace", "enums"]
 tsync = []
 async = []
 backtrace = []
+enums = ["dep:postgres"]
 
 [dependencies]
 clap = { version = "4.3", features = ["derive", "wrap_help"] }
@@ -24,6 +25,7 @@ proc-macro2 = "1"
 indoc = "2.0.0"
 Inflector = { version = "0.11.4" }
 thiserror = "1.0"
+postgres = { version = "0.19.5", optional = true }
 
 [lib]
 path = "src/lib.rs"

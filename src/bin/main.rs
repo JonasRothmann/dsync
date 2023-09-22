@@ -98,6 +98,11 @@ pub struct MainOptions {
     /// ignore tables with underscore prefix
     #[arg(long = "ignore-underscore")]
     pub ignore_underscore_prefix: bool,
+
+    /// Database URL for enums generation
+    #[arg(long = "database-url")]
+    #[cfg(feature = "enums")]
+    pub database_url: String,
 }
 
 fn main() {
@@ -175,6 +180,9 @@ fn actual_main() -> dsync::Result<()> {
             generates_offset_pagination: args.generates_offset_pagination,
             generates_dataloader: args.generates_dataloader,
             ignore_underscore_prefix: args.ignore_underscore_prefix,
+            #[cfg(feature = "enums")]
+            database_url: args.database_url,
+            pool_type: "hansa_db::Pool".to_string(),
         },
     )?;
 

@@ -1,8 +1,10 @@
+use std::{os::unix::raw::mode_t, alloc::System};
+
 use inflector::Inflector;
 use syn::Ident;
 use syn::Item::Macro;
 
-use crate::{code, Error, GenerationConfig, Result};
+use crate::{code, EnsureNonKeyword, Error, GenerationConfig, Result};
 
 pub const FILE_SIGNATURE: &str = "/* @generated and managed by dsync */";
 
@@ -35,6 +37,8 @@ pub struct ParsedTableMacro {
         ForeignTableName,
         JoinColumn, /* this is the column from this table which maps to the foreign table's primary key*/
     )>,
+    /// All relations
+    pub relations: Vec<Relation>,
     /// Final generated code
     pub generated_code: String,
 }
@@ -60,6 +64,25 @@ pub struct ParsedJoinMacro {
     pub table2: Ident,
     /// Column ident of for the foreign key
     pub table1_columns: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Relation {
+    pub table1: Ident,
+    pub table2: Ident,
+    pub relation_type: RelationType,
+}
+
+#[derive(Debug, Clone)]
+pub enum RelationType {
+    OneToOne {
+        table1_column: String,
+    },
+    ManyToMany {
+        join_table: Ident,
+        table1_join_column: String,
+        table2_join_column: String,
+    },
 }
 
 /// Try to parse a diesel schema file contents
@@ -111,6 +134,34 @@ pub fn parse_and_generate_code(
                 }
                 _ => {}
             };
+        }
+    }
+    
+    let cloned_tables = tables.clone();
+    for table in tables.iter_mut() {
+        let is_many_to_many = table.columns.len() == 2 && table.columns.len() == table.foreign_keys.len();
+        if is_many_to_many {
+            table.relations.push(Relation {
+                table1: table.name.clone(),
+                table2: table.foreign_keys[0].0.clone(),
+                relation_type: RelationType::ManyToMany {
+                    join_table: table.name.clone(),
+                    table1_join_column: table.foreign_keys[0].1.clone(),
+                    table2_join_column: table.foreign_keys[1].1.clone(),
+                }
+            })
+        } else {
+            for (foreign_table_name, local_join_column) in &table.foreign_keys {
+                let foreign_table = cloned_tables.iter().find(|table| table.name.to_string() == foreign_table_name.to_string()).expect("could not find foreign table");
+
+                table.relations.push(Relation {
+                    table1: table.name.clone(),
+                    table2: foreign_table.name.clone(),
+                    relation_type: RelationType::OneToOne {
+                        table1_column: local_join_column.clone(),
+                    }
+                })
+            }
         }
     }
 
@@ -322,11 +373,12 @@ fn handle_table_macro(
         struct_name: table_name_ident
             .unwrap()
             .to_string()
-            .to_pascal_case()
-            .to_singular(),
+            .to_pascal_case(),
+            //.to_singular(),
         columns: table_columns,
         primary_key_columns: table_primary_key_idents,
         foreign_keys: vec![],
+        relations: vec![],
         generated_code: format!(
             "{FILE_SIGNATURE}\n\nFATAL ERROR: nothing was generated; this shouldn't be possible."
         ),
@@ -418,9 +470,17 @@ fn schema_type_to_rust_type(schema_type: String, config: &GenerationConfig) -> R
             _ => panic!("Unknown type found '{schema_type}', please report this!")
          */
         _ => {
-            let schema_path = &config.schema_path;
             // return the schema type if no type is found (this means generation is broken for this particular schema)
-            let _type = format!("{schema_path}sql_types::{schema_type}");
+             
+            let _type = if cfg!(feature = "enums") {
+                // lets assume its an enum - this is bad, we should pass at least a vector of enums here
+                let model_path = &config.model_path;
+                format!("{model_path}enums::{schema_type}")
+            } else {
+                let schema_path = &config.schema_path;
+                // return the schema type if no type is found (this means generation is broken for this particular schema)
+                format!("{schema_path}sql_types::{schema_type}")
+            };
             return Ok(_type);
         }
     }.to_string())
